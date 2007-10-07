@@ -2,7 +2,7 @@ package RPC::Async::URL;
 use strict;
 use warnings;
 
-our $VERSION = '1.00';
+our $VERSION = '1.02';
 
 =head1 NAME
 
@@ -134,7 +134,7 @@ sub url_connect {
 
             chdir $dir;
             # TODO: Do diff against default and only add what is not std. 
-            exec 'perl', (map { '-I'.$_ } @INC), "-we", $header, 
+            exec $^X, (map { '-I'.$_ } @INC), "-we", $header, 
             fileno($child), 
                 $file, @callargs;
             die "executing perl: $!\n";
@@ -277,6 +277,8 @@ sub drop_privileges {
     my @p = ((unpack("c2", pack ("i", 1)))[0] == 1 ? ("v", "V", "i") 
         : ("n", "N", "i"));
     foreach my $c (@p) {
+        # FIXME: can be generated with "cd /usr/include;find . -name '*.h' -print | xargs h2ph"
+        require "sys/syscall.ph";
         my $res = syscall (&SYS_setgroups, @gids+0, pack ("$c*", @gids));
         if($res == -1) {
             die("Could not clear groups: $!");

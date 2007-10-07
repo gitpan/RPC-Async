@@ -1,8 +1,8 @@
-#!/usr/bin/perl -w
+#!/usr/bin/env perl
 use strict;
 use warnings;
 
-our $VERSION = "1.0";
+our $VERSION = '1.02';
 
 package RPC::Async::Util;
 
