@@ -1,46 +1,74 @@
-#!/usr/bin/env perl
+package RPC::Async::Util;
 use strict;
 use warnings;
 
-our $VERSION = '1.02';
+our $VERSION = '1.03';
 
-package RPC::Async::Util;
+=head1 NAME
+
+RPC::Async::Util - util module of the asynchronous RPC framework
+
+=cut
 
 use base "Exporter";
 use Class::ISA;
 use Storable qw(nfreeze thaw);
+use Misc::Common qw(treewalk); # FIXME: Don't release before this is a real module
 
-our @EXPORT_OK = qw(call append_data read_packet make_packet);
+our @EXPORT_OK = qw(append_data read_packet make_packet expand);
 
-{
-my %sub_pointers = (); # TODO: does this improve performance?
-sub call($$@) {
-    my ($package, $sub, @args) = @_;
+=head1 METHODS
 
-    my $fqsub = "$package\::$sub";
-    my $ptr = $sub_pointers{$fqsub};
+=over
 
-    if (exists $sub_pointers{$fqsub}) {
-        $ptr = $sub_pointers{$fqsub};
+=cut
 
-    } else {
-        #print "RPC::Async::Util: First call to $fqsub\n";
-        $ptr = UNIVERSAL::can($package, $sub);
-        if (!$ptr) {
-            warn "No sub '$sub' in package '$package'";
-        }
-        $sub_pointers{$fqsub} = $ptr;
-    }
+=item expand($ref, $in)
 
-    if ($ptr) {
-        return $ptr->(@args);
-    } else {
-        return undef;
-    }
+Expands and normalizes the def_* input and output definitions to a unified
+order and naming convention.
+
+=cut
+
+sub expand {
+    my ($ref, $in) = @_;
+    
+    treewalk($ref,
+        sub { 
+            if($in and ${$_[0]} =~ s/^(.+?)_(\d+)$/$2$1/) {
+                return ${$_[0]};
+            } elsif($in) {
+                my $count = 0;
+                return map { sprintf "%02d$_", $count++ } split /\|/, ${$_[0]};
+            } else {
+                return split /\|/, ${$_[0]};
+            }
+        }, 
+        sub{ 
+            no warnings 'uninitialized'; # So we can use $1 even when we got no match
+            ${$_[0]} =~ s/^(?:latin1)/latin1string/;
+            ${$_[0]} =~ s/^(?:str(?:ing)?)|(:?utf8)/utf8string/;
+            ${$_[0]} =~ s/^(?:(u)?int(?:eger)?(?:8))|(?:byte)|(?:char)/$1integer8/;
+            ${$_[0]} =~ s/^(?:(u)?int(?:eger)?(?:16))|(?:short)/$1integer16/;
+            ${$_[0]} =~ s/^(?:(u)?int(?:eger)?(?:(:)|(?:32)|$))|(?:long)/$1integer32$2/; # Default to 32bit
+            ${$_[0]} =~ s/^(?:(u)?int(?:eger)?(?:64))|(?:longlong)/$1integer64/;
+            ${$_[0]} =~ s/^(?:float)?(?:(:)|(?:32)|$)/float32$1/; # Default to 32bit
+            ${$_[0]} =~ s/^(?:float64)|(?:double)/float64$1/;
+            ${$_[0]} =~ s/^(?:bin)|(?:data)/binary/;
+            ${$_[0]} =~ s/^(?:bool)/boolean/;
+        } 
+    );
+
+    return $ref;
 }
-}
 
-sub append_data($$) {
+=item append_data($buf, $data)
+
+Function for buffering data.
+
+=cut
+
+sub append_data {
     my ($buf, $data) = @_;
 
     if (not defined $$buf) {
@@ -50,7 +78,13 @@ sub append_data($$) {
     }
 }
 
-sub read_packet($) {
+=item read_packet($buf)
+
+Reads the next packet and thaws it if enough data has been received.
+
+=cut
+
+sub read_packet {
     my ($buf) = @_;
 
     return if not defined $$buf or length $$buf < 4;
@@ -69,12 +103,20 @@ sub read_packet($) {
     return thaw $frozen;
 }
 
-sub make_packet($) {
+=item make_packet($ref)
+
+Generate a packet for sending.
+
+=cut
+
+sub make_packet {
     my ($ref) = @_;
 
     my $frozen = nfreeze($ref);
     return pack("N", 4 + length $frozen) . $frozen;
 }
+
+=back
 
 =head1 AUTHOR
 

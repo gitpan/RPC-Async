@@ -2,7 +2,7 @@ package RPC::Async::Server;
 use strict;
 use warnings;
 
-our $VERSION = '1.02';
+our $VERSION = '1.03';
 
 =head1 NAME
 
@@ -59,26 +59,10 @@ C<return> on the RPC server object. It is not necessary to call C<return>
 before returning from this method, but it should be called eventually. If the
 client sends invalid data, throw an exception to disconnect him. 
 
-=head2 C<check_request($procedure, @args)> (callback)
-
-If this method exists, it will be called to verify that C<$procedure> exists
-and accepts C<@args>. This check is placed in an external function for a few
-reasons: it allows the client to check its own request before sending it, and
-it allows these checks to be turned off for performance.
-
-Instead of implementing this method in the server, it is a good idea to
-implement it in a base module inherited by the server. That allows the client
-to share the same code.
-
-=head2 C<check_response($procedure, @args)> (callback)
-
-Same as C<check_request>, but for verifying the response going back to the
-client.
-
 =cut
 
 use IO::EventMux;
-use RPC::Async::Util qw(make_packet append_data read_packet call);
+use RPC::Async::Util qw(make_packet append_data read_packet expand);
 use RPC::Async::Coderef;
 
 =head2 C<new($mux [, $package])>
@@ -103,8 +87,6 @@ sub new {
     my %self = (
         mux => $mux,
         package => $package,
-        check_request  => UNIVERSAL::can($package, "check_request"),
-        check_response => UNIVERSAL::can($package, "check_response"),
         buf => undef,
         clients => {},
     );
@@ -151,15 +133,50 @@ sub _handle_read {
 
     while (my $thawed = read_packet(\$self->{buf})) {
         if (ref $thawed eq "ARRAY" and @$thawed >= 2) {
-            my ($id, $procedure, @args) = @$thawed;
+            my ($id, $method, @args) = @$thawed;
+            
+            my $caller = [ $fh, $id, $method ];
+            $self->_decode_args($fh, @args);
+            
+            # Set main ref and package ref to package if not main.
+            my $main = \%main::;
+            my $package = $self->{package} eq 'main'
+                ? $main : $main->{$self->{package}};
 
-            if (!$self->{check_request}
-                    or $self->{check_request}->($procedure, @args)) {
-                my $caller = [ $fh, $id, $procedure ];
-                $self->_decode_args($fh, @args);
-                call($self->{package}, "rpc_$procedure", $caller, @args);
+            # Check if the method exists and call it 
+            if(exists $package->{"rpc_$method"}) {
+                # Get code refrence back
+                my $sub = *{$package->{"rpc_$method"}}{CODE};
+                if($sub) {
+                    $sub->($caller, @args);
+                }
+            
+            } elsif($method eq 'methods') {
+                my %methods = map { /^rpc_(.+)/; $1 => {} }
+                    grep {$_ =~ /^rpc_/} keys %{$package};
+                my %opt = @args;
+                if($opt{defs}) {
+                    foreach my $method (keys %methods) {
+                        if(exists $package->{"def_$method"}) {
+                            my $sub = *{$package->{"def_$method"}}{CODE};
+                            if($sub) {
+                                $methods{$method}{in}
+                                    = expand($sub->($caller, 1), 1);
+                                $methods{$method}{out}
+                                    = expand($sub->($caller, 0));
+                                
+                            } else {
+                                print "Could not find sub def_$1\n";
+                            }
+                        }
+                    }
+                }
+                $self->return($caller, methods => \%methods);
+                
             } else {
-                die "check_request failed\n";
+                $self->return($caller, errors => [
+                    "No sub '$method' in package '$self->{package}'"
+                ]);
             }
 
         } else {
@@ -258,7 +275,7 @@ sub io {
             $self->add_client($fh);
         }
 
-        return undef;
+        return;
 
     } else {
         return $event;

@@ -2,7 +2,7 @@ package RPC::Async::URL;
 use strict;
 use warnings;
 
-our $VERSION = '1.02';
+our $VERSION = '1.03';
 
 =head1 NAME
 
@@ -13,9 +13,10 @@ RPC::Async::URL - Utility functions to handle URLs
     use RPC::Async::URL;
 
     my $socket1 = url_connect("tcp://1.2.3.4:5678");
-    my $socket2 = url_connect("exec://dir/file.pl --my-option");
-
-=head1 METHODS
+    my $socket2 = url_connect("open://dir/file.pl", "--my-option");
+    my ($stdout, $stderr) = url_connect("open2://dir/file.pl", "--my-option");
+    my ($socket3) = url_connect("unix://mysocket.sock");
+    my ($socket4) = url_connect("perl://perlsrvd.pl");
 
 =cut
 
@@ -24,21 +25,31 @@ use Carp;
 use Fcntl;
 use English;
 use File::Basename;
+use Privileges::Drop;
 
 use base "Exporter";
-our @EXPORT = qw(url_connect url_disconnect url_listen url_explode drop_privileges);
+our @EXPORT = qw(url_connect url_disconnect url_listen url_explode 
+    url_absolute);
 
 use Socket;
 use IO::Socket::INET;
 
-# FIXME: update documentation to reflect changes.
+=head1 METHODS
+
+=cut
 
 =head2 B<url_connect($url)>
 
-Turns an URL into a socket. Currently supported schemes are tcp://HOST:PORT and
-exec://SHELL_COMMAND. A program executed with exec will have the option
---connected_fd=NUMBER on its command line, where NUMBER is the file descriptor
-of a stream socket.
+Turns an URL into a socket. Currently supported schemes are:
+ * (tcp|udp)://HOST:PORT, Returns a udp of tcp socket.
+ * (unix|unix_dgram)://path/file.sock, Returns a unix domain socket connection.
+ * (perl|perlroot|perl2|perlroot2)(header)?://path/file.pl, Starts a new perl
+   and loads a default header unless it ends in header, then first argument is
+   used as header. It also connects a socket between the two and returns that. 
+   Urls with 2 in the end also returns $pid, stdout and stderr. Urls with root 
+   in them does not drop root privilages after starting the process the others 
+   will.
+ * open2://file, run file and return stdout, stderr and the $pid.
 
 =cut
 
@@ -50,13 +61,19 @@ sub url_connect {
     
     } elsif ($url =~ m{^tcp://(\d+\.\d+\.\d+\.\d+):(\d+)$}) {
         my ($ip, $port, $option, $timeout) = ($1, $2, @args);
+        
+        # Check if option and timeout is set at the same time
+        if($option and $timeout) { 
+            croak "Can't both have non-blocking and timeout";
+        }
+        
         return (IO::Socket::INET->new(
             Proto    => 'tcp',
             PeerAddr => $ip,
             PeerPort => $port,
             Blocking => ($option?0:1),
             Timeout  => $timeout,
-        ) or carp "Connecting to $url: $!");
+        ) or croak "Connecting to $url: $!");
 
     } elsif ($url =~ m{^unix(?:_(dgram))?://(.+)$}) {
         my ($dgram, $file, $nonblocking) = ($1, $2, @args);
@@ -64,7 +81,7 @@ sub url_connect {
             ($dgram?(Type => SOCK_DGRAM):()),
             Blocking  => ($nonblocking?0:1),
             Peer => $file,
-        ) or carp "Connecting to $url: $!");
+        ) or croak "Connecting to $url: $!");
     
     } elsif ($url =~ m{^udp://(\d+\.\d+\.\d+\.\d+)?:?(\d+)?$}) {
         my ($ip, $port, $option) = ($1, $2, @args);
@@ -74,11 +91,11 @@ sub url_connect {
             ($ip?(PeerAddr => $ip):()),
             ($port?(PeerPort => $port):()),
             Blocking => ($option?0:1),
-        ) or carp "Connecting to $url: $!");
+        ) or croak "Connecting to $url: $!");
 
        
-    } elsif ($url =~ m{^(perl|perlroot|open2perl|open2perlroot)://(.+)$}) {
-        my ($type, $path, $header, @callargs) = ($1, $2, @args);
+    } elsif ($url =~ m{^(perl|perlroot|perl2|perlroot2)(header)?://(.+)$}) {
+        my ($type, $path, $header, @callargs) = ($1, $3, $2, @args);
         
         if(!defined $header) {
             # TODO: rename process to something a little more elegant then this.
@@ -95,12 +112,15 @@ sub url_connect {
             sub init_clients {
                 my ($rpc) = @_;
                 $rpc->add_client($sock);
+                return $sock;
             }
             
             $0="$module";
             
-            do $module or die "Cannot load $module: $@\n";
+            do $module or die "Cannot load $module or $module did not return 1: $@\n";
             );
+        } else {
+            $header = shift @args;
         }
 
         -e "$path" or die "File $path does not exist\n";
@@ -128,7 +148,14 @@ sub url_connect {
                 open STDERR, ">&", $writerERR or die;
             }
             
-            if($type !~ /perlroot/) { drop_privileges(); }
+            if($type !~ /perlroot/) {
+                # FIXME: This should be done by drop_privileges function
+                if($UID == 0 or $GID == 0) {
+                    my $user = $ENV{SUDO_USER} || $ENV{RPC_ASYNC_URL_USER}
+                        or die "RPC_ASYNC_URL_USER environment variable not set";
+                    drop_privileges($user);
+                }
+            }
 
             my ($file, $dir) = fileparse $path;
 
@@ -183,25 +210,68 @@ sub url_connect {
         return $sock;
     
     } else {
-        carp "Cannot parse url: $url";
+        croak "Cannot parse url: $url";
     }
 }
+
+=head2 B<url_absolute($cwd, @urls)>
+
+Make urls paths absolute, by adding $cwd to all urls.
+
+=cut
+
+sub url_absolute {
+    my ($cwd, @urls) = @_;
+    
+    my @results;
+    foreach my $url (@urls) {
+        if($url =~ /^([^:]+\:\/\/)(.+)$/) {
+            push(@results, "$1$cwd/$2");
+        } else {
+            return;
+        }
+    }
+    
+    if(wantarray) {
+        return @results;
+    } else {
+        return $results[0];
+    }
+}
+
+=head2 B<url_disconnect($cwd, @urls)>
+
+Wait for url to disconnect
+
+=cut
 
 sub url_disconnect {
     my ($fh, $pid) = @_;
     waitpid $pid, 0 if $pid;
 }
 
-# TODO: add all types
+=head2 B<url_explode($cwd, @urls)>
+
+Explode URL components into smaller bits, only supports tcp and udp.
+
+=cut
+
 sub url_explode {
     my ($url) = @_;
 
-    if ($url =~ m{^(tcp|udp)://(\d+\.\d+\.\d+\.\d+):(\d+)$}) {
+    if ($url =~ m{^(tcp|udp)://(\d+\.\d+\.\d+\.\d+)?:?(\d+)?$}) {
         return ($1,$2,$3);
+    } else {
+        return;
     }
-    
-    return undef;
 }
+
+=head2 B<url_listen($cwd, @urls)>
+
+Same as connect, just returns a listening socket instead. Only tcp://, udp://
+and unix:// supported.
+
+=cut
 
 sub url_listen {
     my ($url, $nonblocking) = @_;
@@ -214,18 +284,18 @@ sub url_listen {
             LocalPort => $port,
             Blocking  => ($nonblocking?0:1),
             ReuseAddr => 1,
-            Listen    => 5,
-        ) or carp "Listening to $url: $!");
+            Listen    => SOMAXCONN,
+        ) or croak "Listening to $url: $!");
 
     } elsif ($url =~ m{^unix(?:_(dgram))?://(.+)$}) {
         my ($dgram, $file) = ($1, $2);
         unlink($file);
         return (IO::Socket::UNIX->new(
             ($dgram?(Type => SOCK_DGRAM):()),
-            (!$dgram?(Listen => 5):()),
+            (!$dgram?(Listen => SOMAXCONN):()),
             Blocking  => ($nonblocking?0:1),
             Local => $file,
-        ) or carp "Listening to $url: $!");
+        ) or croak "Listening to $url: $!");
 
     } elsif ($url =~ m{^udp://(\d+\.\d+\.\d+\.\d+)?:?(\d+)?$}) {
         my ($ip, $port) = ($1, $2);
@@ -235,71 +305,11 @@ sub url_listen {
             ($port?(LocalPort => $port):()),
             Blocking  => ($nonblocking?0:1),
             ReuseAddr => 1,
-        ) or carp "Listening to $url: $!");
+        ) or croak "Listening to $url: $!");
         
     } else {
-        carp "Cannot parse url: $url";
+        croak "Cannot parse url: $url";
     }
-}
-
-=head2 B<drop_privileges()>
-
-Drops privileges to the user defined in $ENV{'RPC_ASYNC_URL_USER'} 
-or the caller if called with sudo.
-
-=cut
-
-sub drop_privileges {
-    # Check if we are root and stop if we are not.
-    if($UID != 0 and $EUID != 0 
-            and $GID != 0 and $EGID != 0) {
-        
-        return ($UID, $GID);
-    }
-    
-    my $user = $ENV{SUDO_USER} || $ENV{RPC_ASYNC_URL_USER}
-        or die "RPC_ASYNC_URL_USER environment variable not set";
-
-    my ($uid, $gid, $home, $shell) = (getpwnam($user))[2,3,7,8];
-    
-    if(!defined $uid or !defined $gid) {
-        die("Could not find uid and gid user:$user");
-    }
-    
-    $ENV{USER} = $user;
-    $ENV{LOGNAME} = $user;
-    $ENV{HOME} = $home;
-    $ENV{SHELL} = $shell;
-
-    # TODO add groups the the user we change to are in.
-    my @gids = ();
-    # Find out what pointer types to try with for gid_t(little og big endian)
-    my @p = ((unpack("c2", pack ("i", 1)))[0] == 1 ? ("v", "V", "i") 
-        : ("n", "N", "i"));
-    foreach my $c (@p) {
-        # FIXME: can be generated with "cd /usr/include;find . -name '*.h' -print | xargs h2ph"
-        require "sys/syscall.ph";
-        my $res = syscall (&SYS_setgroups, @gids+0, pack ("$c*", @gids));
-        if($res == -1) {
-            die("Could not clear groups: $!");
-        }
-    } 
-
-    foreach(1..2) {
-        $UID = $uid;
-        $GID = $gid;
-        $EUID = $uid;
-        $EGID = "$gid $gid";
-    }
-
-    if($UID != $uid or $EUID != $uid 
-            or $GID != $gid or $EGID != $gid) {
-        
-        die("Could not set current uid:$UID, gid:$GID, euid=$EUID, egid=$EGID "
-            ."to uid:$uid, gid:$gid");
-    }
-
-    return ($uid, $gid);
 }
 
 1;
