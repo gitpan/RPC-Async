@@ -1,6 +1,6 @@
 ---
 name: RPC-Async
-version: 1.03
+version: 1.04
 author:
   - 'Jonas Jensen <jonas@infopro.dk>,Troels Liebe Bentsen <troels@infopro.dk>'
 abstract: Asynchronous RPC framework
@@ -14,22 +14,22 @@ build_requires:
 provides:
   RPC::Async:
     file: lib/RPC/Async.pm
-    version: 1.03
+    version: 1.04
   RPC::Async::Client:
     file: lib/RPC/Async/Client.pm
-    version: 1.03
+    version: 1.04
   RPC::Async::Coderef:
     file: lib/RPC/Async/Coderef.pm
-    version: 1.03
+    version: 1.04
   RPC::Async::Server:
     file: lib/RPC/Async/Server.pm
-    version: 1.03
+    version: 1.04
   RPC::Async::URL:
     file: lib/RPC/Async/URL.pm
-    version: 1.03
+    version: 1.04
   RPC::Async::Util:
     file: lib/RPC/Async/Util.pm
-    version: 1.03
+    version: 1.04
 generated_by: Module::Build version 0.2808
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.2.html
